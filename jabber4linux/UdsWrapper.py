@@ -45,10 +45,25 @@ class UdsWrapper():
 
     debug = False
 
-    def __init__(self, username=None, password=None, serverName=None, serverPort=None, trustedCerts=None, debug=False):
+    # SAML authentication support
+    use_saml = False
+    saml_cookies = None
+
+    def __init__(self, username=None, password=None, serverName=None, serverPort=None, trustedCerts=None, debug=False, saml_cookies=None):
         self.username = username
         self.password = password
         self.debug = debug
+
+        # SAML authentication mode
+        if saml_cookies:
+            self.use_saml = True
+            self.saml_cookies = saml_cookies
+            if self.debug:
+                print(':: UdsWrapper using SAML cookie-based authentication')
+        else:
+            self.use_saml = False
+            if self.debug:
+                print(':: UdsWrapper using HTTP Basic authentication')
 
         if serverName != None and serverName != '' and serverPort != None and int(serverPort) != 0:
             self.serverName = serverName
@@ -62,6 +77,12 @@ class UdsWrapper():
             raise Exception('UDS server not found')
 
         self.http_session = requests.Session()
+
+        # Set SAML cookies on session if provided
+        if self.use_saml and self.saml_cookies:
+            for name, value in self.saml_cookies.items():
+                self.http_session.cookies.set(name, value)
+
         if(trustedCerts):
             # trust custom certs if at least one is given
             # otherwise, system default CAs are used
@@ -84,9 +105,23 @@ class UdsWrapper():
         token = b64encode(f'{username}:{password}'.encode('utf-8')).decode('ascii')
         return f'Basic {token}'
 
+    def get_auth_headers(self):
+        """
+        Get authentication headers based on authentication mode
+
+        Returns:
+            dict: Headers dictionary for HTTP requests
+        """
+        if self.use_saml:
+            # For SAML, cookies are set on session, no Authorization header needed
+            return {}
+        else:
+            # For Basic Auth, include Authorization header
+            return {'Authorization': self.basic_auth(self.username, self.password)}
+
     def getUserDetails(self):
         url = f'https://{self.serverName}:{self.serverPort}/cucm-uds/user/{urllib.parse.quote(self.username)}'
-        with self.http_session.get(url, headers={'Authorization':self.basic_auth(self.username,self.password)}) as result:
+        with self.http_session.get(url, headers=self.get_auth_headers()) as result:
             result.raise_for_status()
             if(self.debug): print(url, '::', result.text, "\n")
             document = minidom.parseString(result.text).documentElement
@@ -150,7 +185,7 @@ class UdsWrapper():
 
     def getDevices(self):
         url = f'https://{self.serverName}:{self.serverPort}/cucm-uds/user/{urllib.parse.quote(self.username)}/devices'
-        with self.http_session.get(url, headers={'Authorization':self.basic_auth(self.username,self.password)}) as result:
+        with self.http_session.get(url, headers=self.get_auth_headers()) as result:
             result.raise_for_status()
             if(self.debug): print(url, '::', result.text, "\n")
             document = minidom.parseString(result.text).documentElement
@@ -167,7 +202,7 @@ class UdsWrapper():
 
     def getDevice(self, id):
         url = f'https://{self.serverName}:{self.serverPort}/cucm-uds/user/{urllib.parse.quote(self.username)}/device/{urllib.parse.quote(id)}'
-        with self.http_session.get(url, headers={'Authorization':self.basic_auth(self.username,self.password)}) as result:
+        with self.http_session.get(url, headers=self.get_auth_headers()) as result:
             result.raise_for_status()
             if(self.debug): print(url, '::', result.text, "\n")
             document = minidom.parseString(result.text).documentElement
@@ -187,7 +222,7 @@ class UdsWrapper():
             }
 
             for item in document.getElementsByTagName('provision')[0].getElementsByTagName('uri'):
-                provisionResult = self.http_session.get(item.firstChild.data, headers={'Authorization':self.basic_auth(self.username,self.password)})
+                provisionResult = self.http_session.get(item.firstChild.data, headers=self.get_auth_headers())
                 try:
                     if(self.debug): print(item.firstChild.data, '::', provisionResult.text, "\n")
                     document2 = expatbuilder.parseString(provisionResult.text, False).documentElement
@@ -229,7 +264,7 @@ class UdsWrapper():
         t.start()
     def parsePhoneBook(self, url, signal):
         users = []
-        with self.http_session.get(url) as response:
+        with self.http_session.get(url, headers=self.get_auth_headers()) as response:
             response.raise_for_status()
             response.encoding = 'UTF-8'
             document = minidom.parseString(response.text).documentElement

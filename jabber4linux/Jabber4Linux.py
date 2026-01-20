@@ -8,6 +8,7 @@ from .CapfWrapper import CapfWrapper
 from .UdsWrapper import UdsWrapper
 from .SipHandler import SipHandler
 from .AudioSocket import AudioPlayer
+from .SamlAuthClient import SamlAuthClient, SamlLoginWindow
 from .Tools import ignoreStderr, niceTime, getFiles
 
 from cryptography.x509 import load_pem_x509_certificate
@@ -147,6 +148,8 @@ class LoginWindow(QtWidgets.QDialog):
     def __init__(self, mainWindow=None, debug=False, *args, **kwargs):
         self.debug = debug
         self.mainWindow = mainWindow
+        self.saml_cookies = None
+        self.use_saml = False
         super(LoginWindow, self).__init__(*args, **kwargs)
 
         # window layout
@@ -173,23 +176,49 @@ class LoginWindow(QtWidgets.QDialog):
         else: self.txtServerPort.setText('8443')
         self.layout.addWidget(self.txtServerPort, 0, 2)
 
+        # Authentication method selection
+        self.lblAuthMethod = QtWidgets.QLabel(translate('Authentication'))
+        self.layout.addWidget(self.lblAuthMethod, 1, 0)
+
+        self.authMethodGroup = QtWidgets.QButtonGroup(self)
+        self.radioBasicAuth = QtWidgets.QRadioButton(translate('Username/Password'))
+        self.radioSamlAuth = QtWidgets.QRadioButton(translate('SAML SSO'))
+        self.radioBasicAuth.setChecked(True)
+        self.authMethodGroup.addButton(self.radioBasicAuth)
+        self.authMethodGroup.addButton(self.radioSamlAuth)
+        self.radioBasicAuth.toggled.connect(self.onAuthMethodChanged)
+
+        authMethodLayout = QtWidgets.QHBoxLayout()
+        authMethodLayout.addWidget(self.radioBasicAuth)
+        authMethodLayout.addWidget(self.radioSamlAuth)
+        self.layout.addLayout(authMethodLayout, 1, 1, 1, 2)
+
         self.lblUsername = QtWidgets.QLabel(translate('Username'))
-        self.layout.addWidget(self.lblUsername, 1, 0)
+        self.layout.addWidget(self.lblUsername, 2, 0)
         self.txtUsername = QtWidgets.QLineEdit()
-        self.layout.addWidget(self.txtUsername, 1, 1, 1, 2)
+        self.layout.addWidget(self.txtUsername, 2, 1, 1, 2)
 
         self.lblPassword = QtWidgets.QLabel(translate('Password'))
-        self.layout.addWidget(self.lblPassword, 2, 0)
+        self.layout.addWidget(self.lblPassword, 3, 0)
         self.txtPassword = QtWidgets.QLineEdit()
         self.txtPassword.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self.layout.addWidget(self.txtPassword, 2, 1, 1, 2)
+        self.layout.addWidget(self.txtPassword, 3, 1, 1, 2)
 
-        self.layout.addWidget(self.buttonBox, 3, 1, 1, 2)
+        # SAML info label (hidden by default)
+        self.lblSamlInfo = QtWidgets.QLabel(
+            translate('SAML authentication will open a browser window.\nLog in with your Keycloak credentials.')
+        )
+        self.lblSamlInfo.setStyleSheet('padding: 8px; background-color: #e3f2fd; border-radius: 4px;')
+        self.lblSamlInfo.setWordWrap(True)
+        self.lblSamlInfo.setVisible(False)
+        self.layout.addWidget(self.lblSamlInfo, 2, 1, 2, 2)
+
+        self.layout.addWidget(self.buttonBox, 4, 1, 1, 2)
         self.setLayout(self.layout)
 
         # window properties
         self.setWindowTitle(translate('Jabber4Linux Login'))
-        self.resize(350, 150)
+        self.resize(400, 200)
         #self.setWindowFlag(QtCore.Qt.WindowType.WindowCloseButtonHint, False)
 
         # center screen
@@ -202,10 +231,35 @@ class LoginWindow(QtWidgets.QDialog):
         if discoveredServer != None:
             self.txtUsername.setFocus()
 
+    def onAuthMethodChanged(self):
+        """Handle authentication method change"""
+        useSaml = self.radioSamlAuth.isChecked()
+
+        # Show/hide appropriate fields
+        self.lblUsername.setVisible(not useSaml)
+        self.txtUsername.setVisible(not useSaml)
+        self.lblPassword.setVisible(not useSaml)
+        self.txtPassword.setVisible(not useSaml)
+        self.lblSamlInfo.setVisible(useSaml)
+
+        # Update button text
+        if useSaml:
+            self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Login with SAML'))
+        else:
+            self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Login'))
+
     def closeEvent(self, event):
         QtCore.QCoreApplication.exit()
 
     def login(self):
+        # Check which authentication method is selected
+        if self.radioSamlAuth.isChecked():
+            self.loginWithSaml()
+        else:
+            self.loginWithBasicAuth()
+
+    def loginWithBasicAuth(self):
+        """Traditional username/password authentication"""
         self.txtUsername.setEnabled(False)
         self.txtPassword.setEnabled(False)
         self.txtServerName.setEnabled(False)
@@ -249,6 +303,99 @@ class LoginWindow(QtWidgets.QDialog):
             self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setEnabled(True)
             self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setEnabled(True)
             self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Login'))
+
+    def loginWithSaml(self):
+        """SAML SSO authentication"""
+        try:
+            # Create SAML client
+            saml_client = SamlAuthClient(
+                self.txtServerName.text(),
+                self.txtServerPort.text(),
+                debug=self.debug
+            )
+
+            # Open SAML login window
+            saml_window = SamlLoginWindow(saml_client, parent=self)
+            saml_window.authenticationCompleted.connect(self.onSamlAuthenticationCompleted)
+
+            if self.debug:
+                print(':: Opening SAML login window')
+
+            if saml_window.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                # SAML authentication succeeded
+                self.completeSamlLogin(saml_client)
+            else:
+                # User cancelled SAML login
+                if self.debug:
+                    print(':: SAML login cancelled by user')
+
+        except Exception as e:
+            traceback.print_exc()
+            showErrorDialog(translate('SAML Login Error'), str(e))
+
+    def onSamlAuthenticationCompleted(self, cookies):
+        """Handle completed SAML authentication"""
+        if self.debug:
+            print(f':: SAML authentication completed with {len(cookies)} cookies')
+        self.saml_cookies = cookies
+
+    def completeSamlLogin(self, saml_client):
+        """Complete login after SAML authentication"""
+        self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setEnabled(False)
+        self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Please wait...'))
+
+        try:
+            # Get username from SAML cookies/session
+            # In SAML SSO, we need to get the username to query UDS API
+            # This should be provided by the user or extracted from SAML assertion
+            username = self.txtUsername.text()
+            if not username:
+                # Prompt for username (needed for UDS API queries)
+                username, ok = QtWidgets.QInputDialog.getText(
+                    self,
+                    translate('Username Required'),
+                    translate('Please enter your username for device configuration:'),
+                    QtWidgets.QLineEdit.EchoMode.Normal
+                )
+                if not ok or not username:
+                    raise Exception('Username is required for device configuration')
+
+            # Create UDS wrapper with SAML cookies
+            uds = UdsWrapper(
+                username=username,
+                password=None,
+                serverName=self.txtServerName.text(),
+                serverPort=self.txtServerPort.text(),
+                trustedCerts=getFiles(SERVER_CERTS_DIR),
+                debug=self.debug,
+                saml_cookies=saml_client.get_session_cookies()
+            )
+
+            userDetails = uds.getUserDetails()
+            devices = []
+            for device in uds.getDevices():
+                deviceDetails = uds.getDevice(device['id'])
+                if deviceDetails != None and deviceDetails['model'] == 'Cisco Unified Client Services Framework':
+                    devices.append(deviceDetails)
+            if len(devices) == 0:
+                raise Exception('Unable to find a Jabber softphone device')
+
+            if(self.mainWindow == None):
+                self.mainWindow = MainWindow({'user':userDetails, 'devices':devices}, debug=self.debug)
+            else:
+                self.mainWindow.user = userDetails
+                self.mainWindow.devices = devices
+            self.mainWindow.show()
+            self.accept()
+
+        except Exception as e:
+            traceback.print_exc()
+            showErrorDialog(translate('Login Error'), str(e))
+
+            self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setEnabled(True)
+            self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setEnabled(True)
+            self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Login with SAML'))
 
 class IncomingCallWindow(QtWidgets.QDialog):
     def __init__(self, callerText, diversionText, *args, **kwargs):

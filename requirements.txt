@@ -18,3 +18,7 @@ g729lib # needs Ubuntu/Debian package: libbcg729-0
 # enables us to use the system theme and avoids unnessesary duplicate installation of the Qt libs on the system.
 # needs: libxcb-cursor0
 PyQt6
+
+# PyQt6-WebEngine for SAML SSO authentication (embedded browser)
+# Debian/Ubuntu package: python3-pyqt6.qtwebengine
+PyQt6-WebEngine
