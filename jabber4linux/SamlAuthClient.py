@@ -19,26 +19,39 @@ class SamlAuthClient:
     CUCM acts as Service Provider (SP) and redirects to Keycloak IdP.
     After successful authentication, CUCM provides session cookies that
     can be used for UDS API calls instead of Basic Auth.
+
+    Supports both:
+    - Direct CUCM connection (internal)
+    - Expressway-C/E proxy (external/MRA)
     """
 
-    def __init__(self, cucm_server, cucm_port='8443', debug=False):
+    def __init__(self, cucm_server, cucm_port='8443', debug=False, use_expressway=False):
         """
         Initialize SAML Auth Client
 
         Args:
-            cucm_server: CUCM server hostname/IP
-            cucm_port: CUCM HTTPS port (default 8443)
+            cucm_server: CUCM/Expressway server hostname/IP
+            cucm_port: HTTPS port (default 8443, or 443 for Expressway)
             debug: Enable debug output
+            use_expressway: True if connecting via Expressway-C proxy
         """
         self.cucm_server = cucm_server
         self.cucm_port = cucm_port
         self.debug = debug
+        self.use_expressway = use_expressway
         self.session_cookies = {}
         self.authenticated = False
 
-        # CUCM SAML SSO endpoint
+        # CUCM/Expressway SAML SSO endpoint
+        # Expressway proxies /ssosp and /cucm-uds to CUCM
         self.saml_login_url = f'https://{cucm_server}:{cucm_port}/ssosp/saml/login'
         self.uds_base_url = f'https://{cucm_server}:{cucm_port}/cucm-uds'
+
+        if self.debug:
+            if use_expressway:
+                print(f':: SAML client configured for Expressway-C proxy: {cucm_server}:{cucm_port}')
+            else:
+                print(f':: SAML client configured for direct CUCM: {cucm_server}:{cucm_port}')
 
     def get_saml_login_url(self):
         """Get the SAML login URL for CUCM"""

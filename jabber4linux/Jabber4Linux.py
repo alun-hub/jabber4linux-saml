@@ -166,14 +166,21 @@ class LoginWindow(QtWidgets.QDialog):
         self.layout.addWidget(self.lblServerName, 0, 0)
 
         self.txtServerName = QtWidgets.QLineEdit()
-        self.txtServerName.setPlaceholderText(translate('Address'))
-        if discoveredServer != None: self.txtServerName.setText(discoveredServer['address'])
+        self.txtServerName.setPlaceholderText(translate('CUCM or Expressway Address'))
+        if discoveredServer != None:
+            self.txtServerName.setText(discoveredServer['address'])
+            # Store if using Expressway for SAML client
+            self.use_expressway = (discoveredServer.get('via') == 'expressway')
+        else:
+            self.use_expressway = False
         self.layout.addWidget(self.txtServerName, 0, 1)
 
         self.txtServerPort = QtWidgets.QLineEdit()
         self.txtServerPort.setPlaceholderText(translate('Port'))
-        if discoveredServer != None: self.txtServerPort.setText(str(discoveredServer['port']))
-        else: self.txtServerPort.setText('8443')
+        if discoveredServer != None:
+            self.txtServerPort.setText(str(discoveredServer['port']))
+        else:
+            self.txtServerPort.setText('8443')
         self.layout.addWidget(self.txtServerPort, 0, 2)
 
         # Authentication method selection
@@ -213,7 +220,14 @@ class LoginWindow(QtWidgets.QDialog):
         self.lblSamlInfo.setVisible(False)
         self.layout.addWidget(self.lblSamlInfo, 2, 1, 2, 2)
 
-        self.layout.addWidget(self.buttonBox, 4, 1, 1, 2)
+        # Expressway checkbox (for external/MRA users)
+        self.chkExpressway = QtWidgets.QCheckBox(translate('Using Expressway-C (external/MRA)'))
+        self.chkExpressway.setChecked(self.use_expressway)
+        self.chkExpressway.setToolTip(translate('Check if connecting via Cisco Expressway for Mobile Remote Access'))
+        self.chkExpressway.stateChanged.connect(self.onExpresswayChanged)
+        self.layout.addWidget(self.chkExpressway, 5, 1, 1, 2)
+
+        self.layout.addWidget(self.buttonBox, 6, 1, 1, 2)
         self.setLayout(self.layout)
 
         # window properties
@@ -247,6 +261,12 @@ class LoginWindow(QtWidgets.QDialog):
             self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Login with SAML'))
         else:
             self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Login'))
+
+    def onExpresswayChanged(self, state):
+        """Handle Expressway checkbox change"""
+        self.use_expressway = (state == QtCore.Qt.CheckState.Checked.value)
+        if self.debug:
+            print(f':: Expressway mode: {self.use_expressway}')
 
     def closeEvent(self, event):
         QtCore.QCoreApplication.exit()
@@ -307,11 +327,16 @@ class LoginWindow(QtWidgets.QDialog):
     def loginWithSaml(self):
         """SAML SSO authentication"""
         try:
+            # Detect if we should use Expressway mode
+            # User can manually set this or it's auto-detected from DNS
+            use_expressway = getattr(self, 'use_expressway', False)
+
             # Create SAML client
             saml_client = SamlAuthClient(
                 self.txtServerName.text(),
                 self.txtServerPort.text(),
-                debug=self.debug
+                debug=self.debug,
+                use_expressway=use_expressway
             )
 
             # Open SAML login window

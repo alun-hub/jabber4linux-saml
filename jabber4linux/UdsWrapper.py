@@ -89,16 +89,41 @@ class UdsWrapper():
             self.http_session.mount('https://', CustomHTTPAdapter(trustedCerts=trustedCerts, debug=debug))
 
     def discoverUdsServer(self):
+        """
+        Discover UDS server via DNS SRV records
+
+        Tries:
+        1. _cisco-uds._tcp (direct CUCM, internal)
+        2. _collab-edge._tls (Expressway-C, external/MRA)
+        """
+        # Try direct CUCM discovery first (internal network)
         try:
             res = resolver.resolve(qname='_cisco-uds._tcp', rdtype=rdatatype.SRV, lifetime=10, search=True)
             for srv in res.rrset:
                 return {
                     # strip the trailing . from the dns resolver for certificate verification reasons
                     'address': str(srv.target).rstrip('.'),
-                    'port': srv.port
+                    'port': srv.port,
+                    'via': 'cucm-direct'
                 }
         except Exception as e:
-            print('DNS auto discovery failed: '+str(e))
+            if self.debug:
+                print(':: CUCM direct discovery (_cisco-uds._tcp) failed: '+str(e))
+
+        # Try Expressway discovery (external network / MRA)
+        try:
+            res = resolver.resolve(qname='_collab-edge._tls', rdtype=rdatatype.SRV, lifetime=10, search=True)
+            for srv in res.rrset:
+                return {
+                    'address': str(srv.target).rstrip('.'),
+                    'port': srv.port,
+                    'via': 'expressway'
+                }
+        except Exception as e:
+            if self.debug:
+                print(':: Expressway discovery (_collab-edge._tls) failed: '+str(e))
+
+        print('DNS auto discovery failed for both CUCM and Expressway')
         return None
 
     def basic_auth(self, username, password):
