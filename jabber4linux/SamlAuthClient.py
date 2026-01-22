@@ -105,6 +105,8 @@ class SamlLoginWindow(QtWidgets.QDialog):
         super(SamlLoginWindow, self).__init__(parent, *args, **kwargs)
         self.saml_client = saml_client
         self.debug = saml_client.debug
+        self.collected_cookies = {}
+        self._auth_completed = False
 
         # Setup window
         self.setWindowTitle('SAML Login - Keycloak Authentication')
@@ -129,6 +131,11 @@ class SamlLoginWindow(QtWidgets.QDialog):
         self.web_page = SamlWebPage(self)
         self.browser.setPage(self.web_page)
 
+        # Set up cookie store to capture cookies
+        profile = self.browser.page().profile()
+        self.cookie_store = profile.cookieStore()
+        self.cookie_store.cookieAdded.connect(self.on_cookie_added)
+
         # Monitor URL changes to detect successful authentication
         self.browser.urlChanged.connect(self.on_url_changed)
         self.browser.loadFinished.connect(self.on_load_finished)
@@ -150,6 +157,22 @@ class SamlLoginWindow(QtWidgets.QDialog):
             print(f":: Loading SAML login URL: {login_url}")
         self.browser.setUrl(QtCore.QUrl(login_url))
 
+    def on_cookie_added(self, cookie):
+        """Handle cookie added by the web engine"""
+        cookie_name = cookie.name().data().decode('utf-8')
+        cookie_value = cookie.value().data().decode('utf-8')
+
+        if self.debug:
+            print(f":: Cookie received: {cookie_name}")
+
+        # Store all cookies
+        self.collected_cookies[cookie_name] = cookie_value
+
+        # Check if we have CUCM session cookies
+        if cookie_name.startswith('JSESSION'):
+            if self.debug:
+                print(f":: Found CUCM session cookie: {cookie_name}")
+
     def on_url_changed(self, url):
         """Handle URL changes during authentication flow"""
         url_string = url.toString()
@@ -157,53 +180,63 @@ class SamlLoginWindow(QtWidgets.QDialog):
             print(f":: URL changed: {url_string}")
 
         # Check if we've completed authentication and returned to CUCM
-        if 'cucm-uds' in url_string or 'ssosp' in url_string:
+        if 'cucm-uds' in url_string or ('ssosp' in url_string and 'login' not in url_string):
             # We might be authenticated, check for cookies
-            self.check_authentication()
+            if self.debug:
+                print(':: Detected CUCM redirect - checking authentication')
+            QtCore.QTimer.singleShot(2000, self.check_authentication)
 
     def on_load_finished(self, success):
         """Handle page load completion"""
-        if self.debug:
-            current_url = self.browser.url().toString()
-            print(f":: Page load finished: {success}, URL: {current_url}")
+        current_url = self.browser.url().toString()
 
-        if success:
-            # Check if authentication completed
-            self.check_authentication()
+        if self.debug:
+            print(f":: Page load finished: {success}, URL: {current_url}")
+            print(f":: Current cookies collected: {list(self.collected_cookies.keys())}")
+
+        if not success:
+            if self.debug:
+                print(f":: Page load failed for: {current_url}")
+            # Don't fail completely - might be a redirect
+            return
+
+        # Give cookies time to be set, then check authentication
+        QtCore.QTimer.singleShot(1000, self.check_authentication)
 
     def check_authentication(self):
         """Check if authentication has completed by examining cookies"""
-        # Get cookies from the browser
-        profile = self.browser.page().profile()
-        cookie_store = profile.cookieStore()
+        if self._auth_completed:
+            return
 
-        # Request to extract all cookies
-        # Note: Cookie extraction is asynchronous in PyQt6
-        # We'll set up a cookie filter to capture them
-        if not hasattr(self, '_cookie_check_done'):
-            self._cookie_check_done = False
-            QtCore.QTimer.singleShot(1500, self.extract_cookies)
+        if self.debug:
+            print(f":: Checking authentication... Collected cookies: {list(self.collected_cookies.keys())}")
 
-    def extract_cookies(self):
-        """Extract cookies from browser session"""
-        # Use profile's cookie store to get all cookies
-        profile = self.browser.page().profile()
-        cookie_store = profile.cookieStore()
+        # Check if we have CUCM session cookies
+        cucm_cookies = {k: v for k, v in self.collected_cookies.items() if k.startswith('JSESSION')}
 
-        # Connect cookie added signal
-        cookie_store.cookieAdded.connect(self.on_cookie_received)
-
-        # Alternative: Try to execute JavaScript to get cookies
-        self.browser.page().runJavaScript(
-            "document.cookie",
-            self.on_javascript_cookies
-        )
+        if cucm_cookies:
+            if self.debug:
+                print(f":: Found CUCM session cookies: {list(cucm_cookies.keys())}")
+            self.complete_authentication(self.collected_cookies)
+        else:
+            # Try JavaScript cookie extraction as fallback
+            if self.debug:
+                print(":: No cookies from cookieStore yet, trying JavaScript...")
+            self.browser.page().runJavaScript(
+                "document.cookie",
+                self.on_javascript_cookies
+            )
 
     def on_javascript_cookies(self, cookie_string):
         """Handle cookies received from JavaScript"""
+        if self._auth_completed:
+            return
+
         if not cookie_string:
             if self.debug:
-                print(":: No cookies found yet")
+                print(":: No cookies from JavaScript yet")
+            # Schedule another check
+            QtCore.QTimer.singleShot(1000, self.check_authentication)
             return
 
         if self.debug:
@@ -212,26 +245,51 @@ class SamlLoginWindow(QtWidgets.QDialog):
         # Parse cookie string
         cookies = {}
         cookie = SimpleCookie()
-        cookie.load(cookie_string)
+        try:
+            cookie.load(cookie_string)
+            for key, morsel in cookie.items():
+                cookies[key] = morsel.value
+        except Exception as e:
+            if self.debug:
+                print(f":: Error parsing cookies: {e}")
+            # Try simple split
+            for item in cookie_string.split(';'):
+                if '=' in item:
+                    key, value = item.strip().split('=', 1)
+                    cookies[key] = value
 
-        for key, morsel in cookie.items():
-            cookies[key] = morsel.value
+        # Merge with collected cookies
+        self.collected_cookies.update(cookies)
 
         # Check for CUCM session cookies
-        # Common CUCM cookie names: JSESSIONID, JSESSIONIDSSO, etc.
         if any(key.startswith('JSESSION') for key in cookies.keys()):
             if self.debug:
-                print(f":: Found CUCM session cookies: {list(cookies.keys())}")
-            self.complete_authentication(cookies)
-
-    def on_cookie_received(self, cookie):
-        """Handle individual cookie received from cookie store"""
-        if self.debug:
-            print(f":: Cookie received: {cookie.name().data().decode()}")
+                print(f":: Found CUCM session cookies via JavaScript: {list(cookies.keys())}")
+            self.complete_authentication(self.collected_cookies)
+        else:
+            if self.debug:
+                print(f":: Still waiting for JSESSION cookies. Have: {list(cookies.keys())}")
+            # Schedule another check
+            QtCore.QTimer.singleShot(1500, self.check_authentication)
 
     def complete_authentication(self, cookies):
         """Complete authentication with received cookies"""
-        if not cookies or hasattr(self, '_auth_completed'):
+        if self._auth_completed:
+            return
+
+        if not cookies:
+            if self.debug:
+                print(":: complete_authentication called but no cookies provided")
+            return
+
+        # Filter for relevant CUCM cookies
+        cucm_cookies = {k: v for k, v in cookies.items() if k.startswith('JSESSION')}
+
+        if not cucm_cookies:
+            if self.debug:
+                print(f":: No JSESSION cookies found. Available: {list(cookies.keys())}")
+            # Schedule another check
+            QtCore.QTimer.singleShot(2000, self.check_authentication)
             return
 
         self._auth_completed = True
@@ -239,11 +297,14 @@ class SamlLoginWindow(QtWidgets.QDialog):
         self.authenticationCompleted.emit(cookies)
 
         # Show success message
-        self.lblInfo.setText('✓ Authentication successful! Closing window...')
+        self.lblInfo.setText(f'✓ Authentication successful! Found cookies: {", ".join(cucm_cookies.keys())}\nClosing window...')
         self.lblInfo.setStyleSheet('padding: 10px; background-color: #c8e6c9;')
 
+        if self.debug:
+            print(f":: Authentication complete with {len(cucm_cookies)} CUCM cookies")
+
         # Close dialog after short delay
-        QtCore.QTimer.singleShot(1000, self.accept)
+        QtCore.QTimer.singleShot(1500, self.accept)
 
 
 class SamlWebPage(QtWebEngineCore.QWebEnginePage):

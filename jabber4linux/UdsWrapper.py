@@ -73,8 +73,11 @@ class UdsWrapper():
             if discoveredServer != None:
                 self.serverName = discoveredServer['address']
                 self.serverPort = discoveredServer['port']
-        if self.serverName == None:
-            raise Exception('UDS server not found')
+            # Don't raise exception here - allow manual server entry
+            # Server validation will happen on first API call
+
+        # Only validate if we're trying to make a connection
+        # This allows the app to start even without DNS/server configured
 
         self.http_session = requests.Session()
 

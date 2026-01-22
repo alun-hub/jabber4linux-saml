@@ -161,7 +161,14 @@ class LoginWindow(QtWidgets.QDialog):
 
         self.layout = QtWidgets.QGridLayout(self)
 
-        discoveredServer = UdsWrapper.discoverUdsServer(None)
+        # Try DNS discovery (optional - don't fail if it doesn't work)
+        discoveredServer = None
+        try:
+            discoveredServer = UdsWrapper.discoverUdsServer(None)
+        except Exception as e:
+            if self.debug:
+                print(f':: DNS discovery failed (not critical): {e}')
+
         self.lblServerName = QtWidgets.QLabel(translate('Server'))
         self.layout.addWidget(self.lblServerName, 0, 0)
 
@@ -176,7 +183,7 @@ class LoginWindow(QtWidgets.QDialog):
         self.layout.addWidget(self.txtServerName, 0, 1)
 
         self.txtServerPort = QtWidgets.QLineEdit()
-        self.txtServerPort.setPlaceholderText(translate('Port'))
+        self.txtServerPort.setPlaceholderText(translate('Port (default: 8443)'))
         if discoveredServer != None:
             self.txtServerPort.setText(str(discoveredServer['port']))
         else:
