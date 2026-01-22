@@ -23,7 +23,7 @@ from jabber4linux.SamlAuthClient import SamlAuthClient, SamlLoginWindow
 
 
 def test_connectivity(server, port):
-    """Test 1: Basic HTTPS connectivity to server"""
+    """Test 1: Basic HTTPS connectivity to server (Expressway or CUCM)"""
     print("\n" + "="*60)
     print("TEST 1: Basic HTTPS Connectivity")
     print("="*60)
@@ -31,19 +31,35 @@ def test_connectivity(server, port):
     url = f"https://{server}:{port}/"
     print(f"Testing connection to: {url}")
 
+    # Detect if this looks like Expressway
+    is_expressway = 'expressway' in server.lower() or 'collab' in server.lower()
+    if is_expressway:
+        print("  Detected: Expressway server (recommended for SAML)")
+    else:
+        print("  Detected: Direct CUCM server (or generic)")
+
     try:
         response = requests.get(url, timeout=10, verify=False)
         print(f"✓ Connection successful!")
         print(f"  Status code: {response.status_code}")
         print(f"  Server responded: YES")
+
+        # Check if we got proxied content (Expressway behavior)
+        if 'CUCM' in response.text or 'Unified' in response.text:
+            print("  ✓ Detected CUCM login page (proxied through Expressway or direct)")
+
         return True
     except requests.exceptions.SSLError as e:
         print(f"✗ SSL Error: {e}")
         print("  Solution: Add server certificate to ~/.config/jabber4linux/server-certs/")
+        if is_expressway:
+            print("           You need: Expressway-E certificate")
         return False
     except requests.exceptions.ConnectionError as e:
         print(f"✗ Connection Error: {e}")
         print("  Solution: Check server address and port, verify firewall rules")
+        if is_expressway:
+            print("           Expressway typically uses port 8443 or 443")
         return False
     except Exception as e:
         print(f"✗ Error: {e}")

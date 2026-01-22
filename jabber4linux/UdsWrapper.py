@@ -95,14 +95,35 @@ class UdsWrapper():
         """
         Discover UDS server via DNS SRV records
 
-        Tries:
-        1. _cisco-uds._tcp (direct CUCM, internal)
-        2. _collab-edge._tls (Expressway-C, external/MRA)
+        Tries (in priority order):
+        1. _collab-edge._tls (Expressway-C, external/MRA) - PREFERRED
+        2. _cisco-uds._tcp (direct CUCM, internal) - FALLBACK
+
+        Note: Expressway is tried first as it's the recommended deployment
+        for modern Cisco Unified Communications environments.
         """
-        # Try direct CUCM discovery first (internal network)
+        # Try Expressway discovery first (external network / MRA)
+        # This is the preferred method for production deployments
+        try:
+            res = resolver.resolve(qname='_collab-edge._tls', rdtype=rdatatype.SRV, lifetime=10, search=True)
+            for srv in res.rrset:
+                if self.debug:
+                    print(f':: Found Expressway via DNS: {srv.target}:{srv.port}')
+                return {
+                    'address': str(srv.target).rstrip('.'),
+                    'port': srv.port,
+                    'via': 'expressway'
+                }
+        except Exception as e:
+            if self.debug:
+                print(':: Expressway discovery (_collab-edge._tls) failed: '+str(e))
+
+        # Fallback: Try direct CUCM discovery (internal network only)
         try:
             res = resolver.resolve(qname='_cisco-uds._tcp', rdtype=rdatatype.SRV, lifetime=10, search=True)
             for srv in res.rrset:
+                if self.debug:
+                    print(f':: Found CUCM direct via DNS: {srv.target}:{srv.port}')
                 return {
                     # strip the trailing . from the dns resolver for certificate verification reasons
                     'address': str(srv.target).rstrip('.'),
@@ -113,20 +134,9 @@ class UdsWrapper():
             if self.debug:
                 print(':: CUCM direct discovery (_cisco-uds._tcp) failed: '+str(e))
 
-        # Try Expressway discovery (external network / MRA)
-        try:
-            res = resolver.resolve(qname='_collab-edge._tls', rdtype=rdatatype.SRV, lifetime=10, search=True)
-            for srv in res.rrset:
-                return {
-                    'address': str(srv.target).rstrip('.'),
-                    'port': srv.port,
-                    'via': 'expressway'
-                }
-        except Exception as e:
-            if self.debug:
-                print(':: Expressway discovery (_collab-edge._tls) failed: '+str(e))
-
-        print('DNS auto discovery failed for both CUCM and Expressway')
+        if self.debug:
+            print(':: DNS auto discovery failed for both Expressway and CUCM')
+            print(':: This is normal if using manual server configuration')
         return None
 
     def basic_auth(self, username, password):
