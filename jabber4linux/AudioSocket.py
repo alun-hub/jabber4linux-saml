@@ -11,7 +11,10 @@ import os, sys
 import traceback
 
 # codec imports
-import audioop
+try:
+    import audioop                 # Python <= 3.12
+except ModuleNotFoundError:
+    import audioop_lts as audioop  # Python >= 3.13 (audioop removed)
 import opuslib
 import g729lib
 
