@@ -164,7 +164,7 @@ class LoginWindow(QtWidgets.QDialog):
         # Try DNS discovery (optional - don't fail if it doesn't work)
         discoveredServer = None
         try:
-            discoveredServer = UdsWrapper.discoverUdsServer(None)
+            discoveredServer = UdsWrapper.discoverUdsServer(self.debug)
         except Exception as e:
             if self.debug:
                 print(f':: DNS discovery failed (not critical): {e}')
@@ -225,7 +225,7 @@ class LoginWindow(QtWidgets.QDialog):
         self.lblSamlInfo.setStyleSheet('padding: 8px; background-color: #e3f2fd; border-radius: 4px;')
         self.lblSamlInfo.setWordWrap(True)
         self.lblSamlInfo.setVisible(False)
-        self.layout.addWidget(self.lblSamlInfo, 2, 1, 2, 2)
+        self.layout.addWidget(self.lblSamlInfo, 3, 1, 1, 2)
 
         # Expressway checkbox (for external/MRA users)
         self.chkExpressway = QtWidgets.QCheckBox(translate('Using Expressway-C (external/MRA)'))
@@ -256,9 +256,9 @@ class LoginWindow(QtWidgets.QDialog):
         """Handle authentication method change"""
         useSaml = self.radioSamlAuth.isChecked()
 
-        # Show/hide appropriate fields
-        self.lblUsername.setVisible(not useSaml)
-        self.txtUsername.setVisible(not useSaml)
+        # Username is always needed (for UDS API calls even with SAML)
+        self.lblUsername.setVisible(True)
+        self.txtUsername.setVisible(True)
         self.lblPassword.setVisible(not useSaml)
         self.txtPassword.setVisible(not useSaml)
         self.lblSamlInfo.setVisible(useSaml)
@@ -378,20 +378,10 @@ class LoginWindow(QtWidgets.QDialog):
         self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(translate('Please wait...'))
 
         try:
-            # Get username from SAML cookies/session
-            # In SAML SSO, we need to get the username to query UDS API
-            # This should be provided by the user or extracted from SAML assertion
-            username = self.txtUsername.text()
+            # Prefer username from SAML assertion (NameID), fall back to manual entry
+            username = saml_client.get_username() or self.txtUsername.text()
             if not username:
-                # Prompt for username (needed for UDS API queries)
-                username, ok = QtWidgets.QInputDialog.getText(
-                    self,
-                    translate('Username Required'),
-                    translate('Please enter your username for device configuration:'),
-                    QtWidgets.QLineEdit.EchoMode.Normal
-                )
-                if not ok or not username:
-                    raise Exception('Username is required for device configuration')
+                raise Exception(translate('Could not determine username from SAML assertion. Please enter your username manually.'))
 
             # Create UDS wrapper with SAML cookies
             uds = UdsWrapper(

@@ -69,7 +69,7 @@ class UdsWrapper():
             self.serverName = serverName
             self.serverPort = serverPort
         else:
-            discoveredServer = self.discoverUdsServer()
+            discoveredServer = UdsWrapper.discoverUdsServer(self.debug)
             if discoveredServer != None:
                 self.serverName = discoveredServer['address']
                 self.serverPort = discoveredServer['port']
@@ -91,7 +91,8 @@ class UdsWrapper():
             # otherwise, system default CAs are used
             self.http_session.mount('https://', CustomHTTPAdapter(trustedCerts=trustedCerts, debug=debug))
 
-    def discoverUdsServer(self):
+    @staticmethod
+    def discoverUdsServer(debug=False):
         """
         Discover UDS server via DNS SRV records
 
@@ -107,7 +108,7 @@ class UdsWrapper():
         try:
             res = resolver.resolve(qname='_collab-edge._tls', rdtype=rdatatype.SRV, lifetime=10, search=True)
             for srv in res.rrset:
-                if self.debug:
+                if debug:
                     print(f':: Found Expressway via DNS: {srv.target}:{srv.port}')
                 return {
                     'address': str(srv.target).rstrip('.'),
@@ -115,14 +116,14 @@ class UdsWrapper():
                     'via': 'expressway'
                 }
         except Exception as e:
-            if self.debug:
+            if debug:
                 print(':: Expressway discovery (_collab-edge._tls) failed: '+str(e))
 
         # Fallback: Try direct CUCM discovery (internal network only)
         try:
             res = resolver.resolve(qname='_cisco-uds._tcp', rdtype=rdatatype.SRV, lifetime=10, search=True)
             for srv in res.rrset:
-                if self.debug:
+                if debug:
                     print(f':: Found CUCM direct via DNS: {srv.target}:{srv.port}')
                 return {
                     # strip the trailing . from the dns resolver for certificate verification reasons
@@ -131,10 +132,10 @@ class UdsWrapper():
                     'via': 'cucm-direct'
                 }
         except Exception as e:
-            if self.debug:
+            if debug:
                 print(':: CUCM direct discovery (_cisco-uds._tcp) failed: '+str(e))
 
-        if self.debug:
+        if debug:
             print(':: DNS auto discovery failed for both Expressway and CUCM')
             print(':: This is normal if using manual server configuration')
         return None

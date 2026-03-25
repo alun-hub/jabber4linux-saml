@@ -5,11 +5,37 @@ SAML Authentication Client for Jabber4Linux
 Handles SAML SSO authentication flow with Cisco CUCM and Keycloak IdP
 """
 
-import requests
-import json
-import urllib.parse
 from PyQt6 import QtWidgets, QtCore, QtWebEngineWidgets, QtWebEngineCore
 from http.cookies import SimpleCookie
+
+# Injected into every page in the browser session.
+# Intercepts SAML assertion form submissions and extracts the NameID (username)
+# by decoding the SAMLResponse field and parsing the XML.
+# Uses console.log with a sentinel prefix so Python can capture it via
+# javaScriptConsoleMessage without any extra IPC mechanism.
+_SAML_USERNAME_SCRIPT = """
+(function() {
+    function extractSamlUsername(form) {
+        try {
+            var samlInput = form.querySelector('input[name="SAMLResponse"]');
+            if (!samlInput) return;
+            var xml = atob(samlInput.value);
+            var doc = (new DOMParser()).parseFromString(xml, 'text/xml');
+            var ns = 'urn:oasis:names:tc:SAML:2.0:assertion';
+            var nodes = doc.getElementsByTagNameNS(ns, 'NameID');
+            if (nodes.length > 0 && nodes[0].textContent) {
+                console.log('SAML_USERNAME:' + nodes[0].textContent.trim());
+            }
+        } catch(e) {}
+    }
+    var orig = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function() {
+        extractSamlUsername(this);
+        orig.apply(this, arguments);
+    };
+    document.addEventListener('submit', function(e) { extractSamlUsername(e.target); }, true);
+})();
+"""
 
 
 class SamlAuthClient:
@@ -41,6 +67,7 @@ class SamlAuthClient:
         self.use_expressway = use_expressway
         self.session_cookies = {}
         self.authenticated = False
+        self.username = None
 
         # CUCM/Expressway SAML SSO endpoint
         # Expressway proxies /ssosp and /cucm-uds to CUCM
@@ -56,6 +83,17 @@ class SamlAuthClient:
     def get_saml_login_url(self):
         """Get the SAML login URL for CUCM"""
         return self.saml_login_url
+
+    def get_username(self):
+        """Get username extracted from SAML assertion"""
+        return self.username
+
+    def set_username(self, username):
+        """Set username parsed from SAML NameID"""
+        # NameID may be email format (user@domain) — use only the local part
+        self.username = username.split('@')[0] if '@' in username else username
+        if self.debug:
+            print(f':: SAML username set from assertion: {self.username}')
 
     def is_authenticated(self):
         """Check if user is authenticated"""
@@ -106,6 +144,7 @@ class SamlLoginWindow(QtWidgets.QDialog):
         self.saml_client = saml_client
         self.debug = saml_client.debug
         self.collected_cookies = {}
+        self.cucm_session_cookies = {}
         self._auth_completed = False
 
         # Setup window
@@ -136,6 +175,16 @@ class SamlLoginWindow(QtWidgets.QDialog):
         self.cookie_store = profile.cookieStore()
         self.cookie_store.cookieAdded.connect(self.on_cookie_added)
 
+        # Inject script that extracts NameID from SAML assertion form submission.
+        # Runs at document creation so it wraps form.submit() before Keycloak calls it.
+        if not profile.scripts().find('saml_username_extractor'):
+            script = QtWebEngineCore.QWebEngineScript()
+            script.setName('saml_username_extractor')
+            script.setSourceCode(_SAML_USERNAME_SCRIPT)
+            script.setInjectionPoint(QtWebEngineCore.QWebEngineScript.InjectionPoint.DocumentCreation)
+            script.setWorldId(QtWebEngineCore.QWebEngineScript.ScriptWorldId.MainWorld)
+            profile.scripts().insert(script)
+
         # Monitor URL changes to detect successful authentication
         self.browser.urlChanged.connect(self.on_url_changed)
         self.browser.loadFinished.connect(self.on_load_finished)
@@ -161,17 +210,27 @@ class SamlLoginWindow(QtWidgets.QDialog):
         """Handle cookie added by the web engine"""
         cookie_name = cookie.name().data().decode('utf-8')
         cookie_value = cookie.value().data().decode('utf-8')
+        cookie_domain = cookie.domain().lstrip('.')
 
         if self.debug:
-            print(f":: Cookie received: {cookie_name}")
+            print(f":: Cookie received: {cookie_name} (domain: {cookie_domain})")
 
         # Store all cookies
         self.collected_cookies[cookie_name] = cookie_value
 
-        # Check if we have CUCM session cookies
+        # Track JSESSION cookies only from the CUCM/Expressway domain.
+        # Use boundary-aware matching: cookie domain must either be exactly the
+        # server hostname, or a parent domain (e.g. "company.com" for "expressway.company.com").
         if cookie_name.startswith('JSESSION'):
-            if self.debug:
-                print(f":: Found CUCM session cookie: {cookie_name}")
+            cucm_server = self.saml_client.cucm_server
+            domain_match = (
+                cookie_domain == cucm_server or
+                cucm_server.endswith('.' + cookie_domain)
+            )
+            if domain_match:
+                self.cucm_session_cookies[cookie_name] = cookie_value
+                if self.debug:
+                    print(f":: Found CUCM session cookie: {cookie_name} from {cookie_domain}")
 
     def on_url_changed(self, url):
         """Handle URL changes during authentication flow"""
@@ -200,8 +259,10 @@ class SamlLoginWindow(QtWidgets.QDialog):
             # Don't fail completely - might be a redirect
             return
 
-        # Give cookies time to be set, then check authentication
-        QtCore.QTimer.singleShot(1000, self.check_authentication)
+        # Only check authentication when we're back on the CUCM/Expressway server,
+        # not on the IdP (Keycloak) pages where the IdP may set its own JSESSION cookies
+        if self.saml_client.cucm_server in current_url:
+            QtCore.QTimer.singleShot(1000, self.check_authentication)
 
     def check_authentication(self):
         """Check if authentication has completed by examining cookies"""
@@ -210,18 +271,17 @@ class SamlLoginWindow(QtWidgets.QDialog):
 
         if self.debug:
             print(f":: Checking authentication... Collected cookies: {list(self.collected_cookies.keys())}")
+            print(f":: CUCM domain cookies: {list(self.cucm_session_cookies.keys())}")
 
-        # Check if we have CUCM session cookies
-        cucm_cookies = {k: v for k, v in self.collected_cookies.items() if k.startswith('JSESSION')}
-
-        if cucm_cookies:
+        # Prioritize cookies confirmed to be from the CUCM/Expressway domain
+        if self.cucm_session_cookies:
             if self.debug:
-                print(f":: Found CUCM session cookies: {list(cucm_cookies.keys())}")
+                print(f":: Found CUCM session cookies: {list(self.cucm_session_cookies.keys())}")
             self.complete_authentication(self.collected_cookies)
         else:
             # Try JavaScript cookie extraction as fallback
             if self.debug:
-                print(":: No cookies from cookieStore yet, trying JavaScript...")
+                print(":: No CUCM cookies from cookieStore yet, trying JavaScript...")
             self.browser.page().runJavaScript(
                 "document.cookie",
                 self.on_javascript_cookies
@@ -293,8 +353,11 @@ class SamlLoginWindow(QtWidgets.QDialog):
             return
 
         self._auth_completed = True
-        self.saml_client.set_session_cookies(cookies)
-        self.authenticationCompleted.emit(cookies)
+        # Pass only domain-verified CUCM cookies to the session.
+        # Fall back to the JSESSION-filtered collected cookies (JS fallback path).
+        session_cookies = self.cucm_session_cookies if self.cucm_session_cookies else cucm_cookies
+        self.saml_client.set_session_cookies(session_cookies)
+        self.authenticationCompleted.emit(session_cookies)
 
         # Show success message
         self.lblInfo.setText(f'✓ Authentication successful! Found cookies: {", ".join(cucm_cookies.keys())}\nClosing window...')
@@ -325,6 +388,13 @@ class SamlWebPage(QtWebEngineCore.QWebEnginePage):
         if self.parent_window.debug:
             print(f":: SamlWebPage load finished: {success}")
 
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        """Capture SAML username logged by the injected script"""
+        if message.startswith('SAML_USERNAME:'):
+            username = message[14:].strip()
+            if username:
+                self.parent_window.saml_client.set_username(username)
+
     def certificateError(self, error):
         """Handle SSL certificate errors (accept self-signed certs)"""
         if self.parent_window.debug:
@@ -332,35 +402,3 @@ class SamlWebPage(QtWebEngineCore.QWebEnginePage):
         # Accept the certificate (use with caution!)
         return True
 
-
-class SamlAuthenticatedSession:
-    """
-    HTTP Session wrapper that uses SAML cookies for authentication
-
-    This replaces HTTP Basic Auth with session cookies obtained
-    from SAML SSO authentication.
-    """
-
-    def __init__(self, saml_client, http_session=None):
-        """
-        Initialize authenticated session
-
-        Args:
-            saml_client: SamlAuthClient with valid session
-            http_session: Optional requests.Session to use
-        """
-        self.saml_client = saml_client
-        self.http_session = http_session or requests.Session()
-
-        # Set cookies on session
-        for name, value in saml_client.get_session_cookies().items():
-            self.http_session.cookies.set(name, value)
-
-    def get_session(self):
-        """Get the authenticated HTTP session"""
-        return self.http_session
-
-    def update_cookies(self, new_cookies):
-        """Update session cookies"""
-        for name, value in new_cookies.items():
-            self.http_session.cookies.set(name, value)
