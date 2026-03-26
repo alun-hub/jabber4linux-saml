@@ -2,6 +2,9 @@
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 
+import requests
+import urllib3
+
 from .__init__ import __title__, __version__, __website__
 from .__init__ import CFG_DIR, CFG_PATH, HISTORY_PATH, PHONEBOOK_PATH, CLIENT_CERTS_DIR, SERVER_CERTS_DIR
 from .CapfWrapper import CapfWrapper
@@ -220,7 +223,9 @@ class LoginWindow(QtWidgets.QDialog):
 
         # SAML info label (hidden by default)
         self.lblSamlInfo = QtWidgets.QLabel(
-            translate('SAML authentication will open a browser window.\nLog in with your Keycloak credentials.')
+            translate('SAML authentication will open a browser window.\n'
+                      'Log in with your identity provider credentials.\n'
+                      'Requires Expressway-C HTTP Proxy configured for /ssosp and /cucm-uds.')
         )
         self.lblSamlInfo.setStyleSheet('padding: 8px; background-color: #e3f2fd; border-radius: 4px;')
         self.lblSamlInfo.setWordWrap(True)
@@ -228,9 +233,11 @@ class LoginWindow(QtWidgets.QDialog):
         self.layout.addWidget(self.lblSamlInfo, 3, 1, 1, 2)
 
         # Expressway checkbox (for external/MRA users)
-        self.chkExpressway = QtWidgets.QCheckBox(translate('Using Expressway-C (external/MRA)'))
+        self.chkExpressway = QtWidgets.QCheckBox(translate('Connecting via Expressway (MRA)'))
         self.chkExpressway.setChecked(self.use_expressway)
-        self.chkExpressway.setToolTip(translate('Check if connecting via Cisco Expressway for Mobile Remote Access'))
+        self.chkExpressway.setToolTip(translate(
+            'Check if connecting via Cisco Expressway-E for Mobile Remote Access (MRA).\n'
+            'Expressway-E must be configured with HTTP Proxy forwarding /ssosp and /cucm-uds to CUCM.'))
         self.chkExpressway.stateChanged.connect(self.onExpresswayChanged)
         self.layout.addWidget(self.chkExpressway, 5, 1, 1, 2)
 
@@ -345,6 +352,51 @@ class LoginWindow(QtWidgets.QDialog):
                 debug=self.debug,
                 use_expressway=use_expressway
             )
+
+            # Pre-flight: verify the SAML endpoint is reachable before opening browser
+            saml_url = saml_client.get_saml_login_url()
+            try:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                resp = requests.get(saml_url, timeout=8, verify=False, allow_redirects=False)
+                if resp.status_code == 404:
+                    showErrorDialog(
+                        translate('SAML Endpoint Not Found'),
+                        translate(
+                            'The SAML login endpoint was not found on the server (HTTP 404).\n\n'
+                            'URL: {}\n\n'
+                            'This is a server-side configuration issue. '
+                            'To fix this, the Expressway-C administrator must:\n'
+                            '  1. Enable HTTP Proxy service on Expressway-C\n'
+                            '  2. Map path /ssosp to the CUCM server\n'
+                            '  3. Map path /cucm-uds to the CUCM server\n'
+                            '  4. Ensure Expressway-E forwards HTTP proxy traffic\n\n'
+                            'Also verify that SAML SSO is enabled on CUCM.'
+                        ).format(saml_url),
+                        icon=QtWidgets.QMessageBox.Icon.Warning
+                    )
+                    return
+            except requests.exceptions.ConnectionError as e:
+                showErrorDialog(
+                    translate('Connection Failed'),
+                    translate(
+                        'Could not connect to the server.\n\n'
+                        'URL: {}\n\n'
+                        'Please verify:\n'
+                        '  • Server address and port are correct\n'
+                        '  • Expressway-E is reachable from your network\n'
+                        '  • Firewall rules allow port {}'
+                    ).format(saml_url, self.txtServerPort.text()),
+                    str(e)
+                )
+                return
+            except requests.exceptions.Timeout:
+                # Connection timed out — let the browser try anyway
+                if self.debug:
+                    print(':: Pre-flight check timed out, proceeding anyway')
+            except Exception as e:
+                # Other errors (SSL etc) — let the browser handle it
+                if self.debug:
+                    print(f':: Pre-flight check failed ({e}), proceeding anyway')
 
             # Open SAML login window
             saml_window = SamlLoginWindow(saml_client, parent=self)

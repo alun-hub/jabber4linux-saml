@@ -71,7 +71,7 @@ python3 -m jabber4linux --debug
 │ ○ Username/Password                     │
 │ ● SAML SSO                              │ ← Select this
 │                                         │
-│ ☑ Using Expressway-C (external/MRA)    │ ← Check this
+│ ☑ Connecting via Expressway (MRA)      │ ← Check this
 │                                         │
 │ [Login with SAML]  [Exit]               │
 └─────────────────────────────────────────┘
@@ -85,6 +85,30 @@ python3 -m jabber4linux --debug
 - Jabber4Linux starts!
 
 ## Troubleshooting
+
+### Problem: "SAML Endpoint Not Found" (HTTP 404)
+
+The SAML endpoint `/ssosp/saml/login` is not accessible on Expressway-E. This is a **server configuration issue**.
+
+The Expressway-C administrator must configure HTTP Proxy:
+
+```
+Expressway-C → Applications → Unified Communications → HTTP Proxy
+  Status: Enabled
+
+  HTTP Server 1: <CUCM hostname>:<port>
+
+  HTTP Allowed Paths:
+    /ssosp     → CUCM
+    /cucm-uds  → CUCM
+
+  Cookie Passthrough: Enabled
+  Session Stickiness: Enabled
+```
+
+Also verify in CUCM Admin → System → SAML Single Sign-On:
+- SAML SSO: Enabled
+- Entity ID: `https://expressway-e.example.com:8443` (Expressway-E address, NOT CUCM)
 
 ### Problem: "Connection refused"
 
@@ -134,7 +158,7 @@ _collab-edge._tls.example.com. IN SRV 0 0 8443 expressway-e.example.com.
 
 **With DNS configured:**
 - Server field auto-fills with Expressway address
-- "Using Expressway-C" auto-checked
+- "Connecting via Expressway (MRA)" auto-checked
 - No manual configuration needed!
 
 **Test DNS:**
